@@ -3,96 +3,48 @@
 #include "Common.h"
 
 // for register macros
-#include <intrin.h>
-#include "asmstubs.h"
-
-//PLOAD_IMAGE_NOTIFY_ROUTINE ImageNotifyRoutine(PUNICODE_STRING FullImageName, HANDLE ProcID, PIMAGE_INFO ImageInfo)
-//{
-//
-//    UNREFERENCED_PARAMETER(ImageInfo);
-//    UNREFERENCED_PARAMETER(ProcID);
-//
-//
-//    if (wcsstr(FullImageName->Buffer, L"\\WinKernelProgDrv.sys"))
-//    {
-//        KdPrint(("[NOMAD] [INFO] Found WinKernelProgDrv.sys!  Dumping!\n"));
-//        UINT64 base = (UINT64)ImageInfo->ImageBase;
-//        DumpKernelModule("WinKernelProgDrv.sys");
-//    }
-//
-//    return STATUS_SUCCESS;
-//}
+//#include <intrin.h>
+//#include "asmstubs.h"
 
 PRTL_PROCESS_MODULES outProcMods = NULL;
 
-extern "C"
-NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
+extern "C" NTSTATUS DriverEntry()
 {
-	UNREFERENCED_PARAMETER(RegistryPath);
-    KdPrint(("[NOMAD] [INFO] Starting Initialization\n"));
+    Log("DriverEntry() Starting Diglett!\n");
 
-    //PsSetLoadImageNotifyRoutine((PLOAD_IMAGE_NOTIFY_ROUTINE)ImageNotifyRoutine);
+    LogInfo("Setting LoadImageNotify routine\n");
+    PsSetLoadImageNotifyRoutine((PLOAD_IMAGE_NOTIFY_ROUTINE)ImageNotifyRoutine);
     
-    // map major function handlers
-	DriverObject->MajorFunction[IRP_MJ_CREATE] = NomadCreate;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE] = NomadClose;
-	DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = NomadDeviceControl;
-    DriverObject->DriverUnload = NomadUnload;
-    
-    // Create a device object for the usermode application to use
-    UNICODE_STRING devName = RTL_CONSTANT_STRING(L"\\Device\\Nomad");
-
-    PDEVICE_OBJECT DeviceObject;
-    NTSTATUS status = IoCreateDevice(DriverObject, 0, &devName, FILE_DEVICE_UNKNOWN, 0, FALSE, &DeviceObject);
-
-    // error check for successful driver object creation
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("[NOMAD] [ERROR] Failed to create device object (0x%08X)\n", status));
-        return status;
-    }
-
-    // provide symbolic link to device object to make accessible to usermode
-    UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Nomad");
-    status = IoCreateSymbolicLink(&symLink, &devName);
-
-    // error check for sym link creation
-    if (!NT_SUCCESS(status))
-    {
-        KdPrint(("[NOMAD] [ERROR] Failed to create symbolic link (0x%08X)\n", status));
-        IoDeleteDevice(DeviceObject);
-        return status;
-    }
-
-    KdPrint(("[NOMAD] [INFO] Nomad driver initialized successfully\n"));
+    // Diglett is not legit, he doesn't create a device object :(
 
     wchar_t* apiNames[WINAPI_IMPORT_COUNT] = { L"ZwQuerySystemInformation" };
     //PVOID pWinPrims[WINAPI_IMPORT_COUNT];
     GenericFuncPtr(pWinPrims[WINAPI_IMPORT_COUNT]);
-    status = ImportWinPrimitives(pWinPrims, apiNames);
+    NTSTATUS status = ImportWinPrimitives(pWinPrims, apiNames);
     if (!NT_SUCCESS(status))
     {
-        KdPrint(("[NOMAD] [ERROR] Importing windows primitives failed.  Aborting task\n"));
+        LogError("Importing windows primitives failed.  Aborting task\n");
         return STATUS_SUCCESS;
     }
 
     EnumKernelModuleInfo((ZwQuerySysInfoPtr)pWinPrims[ZW_QUERY_INFO]);
     
-
     // All checks complete
-    KdPrint(("[NOMAD] [INFO] All checks passed.  Nothing suspicious.\n"));
+    LogInfo("All checks passed.  Nothing suspicious.\n");
+
+    LogInfo(("~DriverEntry()\n"));
     return STATUS_SUCCESS;
 }
 
 /// <summary>
 /// Dynamic importing via a documented method
 /// </summary>
-/// <param name="pWinPrims"></param>
-/// <param name="names"></param>
+/// <param name="pWinPrims">Array that holds WinPrimitive pointers</param>
+/// <param name="names">names of routines to import</param>
 /// <returns></returns>
 NTSTATUS ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), _In_ wchar_t* names[])
 {
-    KdPrint(("[NOMAD] [INFO] Importing windows primitives\n"));
+    LogInfo("Importing windows primitives\n");
     
     UNICODE_STRING uniNames[WINAPI_IMPORT_COUNT];
 
@@ -101,112 +53,65 @@ NTSTATUS ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), _In_ wchar_t* na
         RtlInitUnicodeString(&uniNames[i], names[i]);
     }
 
-    CHAR ansiImportName[MAX_NAME_LEN];
-
     for (size_t i = 0; i < WINAPI_IMPORT_COUNT; i++)
     {
-        //pWinPrims[i] = MmGetSystemRoutineAddress(&uniNames[i]);
         pWinPrims[i] = (GenericFuncPtr)MmGetSystemRoutineAddress(&uniNames[i]);
         if (pWinPrims[i] == NULL)
         {
-            KdPrint(("[NOMAD] [ERROR] Failed to import %s\n", (unsigned char*)ansiImportName));
+            LogError(("Failed to import %s\n", (unsigned char*)ansiImportName));
             return STATUS_UNSUCCESSFUL;
         }
         else
         {
-            KdPrint(("[NOMAD] [INFO] Succesfully imported %ls at %p\n", uniNames[i].Buffer, pWinPrims[i]));
+            LogInfo(("Succesfully imported %ls at %p\n", uniNames[i].Buffer, pWinPrims[i]));
         }
     }
-    
     return STATUS_SUCCESS;
 }
 
-void NomadUnload(_In_ PDRIVER_OBJECT DriverObject)
-{
-    UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Nomad");
-    // delete sym link
-    IoDeleteSymbolicLink(&symLink);
-
-    // delete device object
-    IoDeleteDevice(DriverObject->DeviceObject);
-    KdPrint(("[NOMAD] [INFO] Nomad unloaded\n"));
-
-    if (outProcMods)
-    {
-        ExFreePool(outProcMods);
-    }
-}
-
-_Use_decl_annotations_
-NTSTATUS NomadCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    UNREFERENCED_PARAMETER(DeviceObject);
-
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    KdPrint(("[NOMAD] [INFO] Client connection received\n"));
-    return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_
-NTSTATUS NomadClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    UNREFERENCED_PARAMETER(DeviceObject);
-
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    KdPrint(("[NOMAD] [INFO] Client closed handle.\n"));
-    return STATUS_SUCCESS;
-}
-
-
-_Use_decl_annotations_
-NTSTATUS NomadDeviceControl(PDEVICE_OBJECT, PIRP Irp)
-{
-    // get our IO_STACK_LOCATION
-    auto stack = IoGetCurrentIrpStackLocation(Irp);
-    auto status = STATUS_SUCCESS;
-
-    switch (stack->Parameters.DeviceIoControl.IoControlCode)
-    {
-    case IOCTL_DUMP_KERNEL_MODULE: {
-        // do the work
-        if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(MD_MODULE_DATA))
-        {
-            status = STATUS_BUFFER_TOO_SMALL;
-            break;
-        }
-
-        auto data = (PMD_MODULE_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
-
-        if (data == nullptr)
-        {
-            status = STATUS_INVALID_PARAMETER;
-            break;
-        }
-
-        //status = DumpKernelModule(data->moduleName);
-        //if (!NT_SUCCESS(status))
-        //{
-        //    KdPrint(("[NOMAD] [ERROR] Failed to dump kernel module\n"));
-        //    break;
-        //}
-
-        KdPrint(("[NOMAD] [INFO] Successfully dumped kernel module\n"));
-        break;
-    }
-    default:
-        status = STATUS_INVALID_DEVICE_REQUEST;
-        break;
-    }
-
-    Irp->IoStatus.Status = status;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return status;
-}
+// TODO, Communication method via hook in legit driver Device Control handler.  (probably will hook the Create IRP_MJ_CREATE
+//NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT, PIRP Irp)
+//{
+//    auto status = STATUS_SUCCESS;
+//
+//    switch (stack->Parameters.DeviceIoControl.IoControlCode)
+//    {
+//    case IOCTL_DUMP_KERNEL_MODULE: {
+//        // do the work
+//        if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(MD_MODULE_DATA))
+//        {
+//            status = STATUS_BUFFER_TOO_SMALL;
+//            break;
+//        }
+//
+//        auto data = (PMD_MODULE_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
+//
+//        if (data == nullptr)
+//        {
+//            status = STATUS_INVALID_PARAMETER;
+//            break;
+//        }
+//
+//        //status = DumpKernelModule(data->moduleName);
+//        //if (!NT_SUCCESS(status))
+//        //{
+//        //    KdPrint(("[NOMAD] [ERROR] Failed to dump kernel module\n"));
+//        //    break;
+//        //}
+//
+//        LogInfo(("Successfully dumped kernel module\n"));
+//        break;
+//    }
+//    default:
+//        status = STATUS_INVALID_DEVICE_REQUEST;
+//        break;
+//    }
+//
+//    Irp->IoStatus.Status = status;
+//    Irp->IoStatus.Information = 0;
+//    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+//    return status;
+//}
 
 /*
 * WIP to manually parse PTE entries
@@ -340,6 +245,7 @@ bool IsValidPTE(PVOID VirtAddress)
 /// <param name="ZwQuerySysInfo">pointer to ZwQuerySystemInformation</param>
 /// <param name="outProcMods">pointer to struct with data out</param>
 /// <returns>status</returns>
+
 NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
     ULONG size = NULL;
     outProcMods = NULL;
@@ -347,50 +253,108 @@ NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
     // test our pointer
     NTSTATUS status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, 0, 0, &size);
     if (STATUS_INFO_LENGTH_MISMATCH == status) {
-        KdPrint(("[NOMAD] [INFO] ZwQuerySystemInformation test successed, status: %08x", status));
+        LogError(("ZwQuerySystemInformation test successed, status: %08x", status));
     }
     else
     {
-        KdPrint(("[NOMAD] [ERROR] Unexpected value from ZwQuerySystemInformation, status: %08x", status));
+        LogError(("Unexpected value from ZwQuerySystemInformation, status: %08x", status));
         return status;
     }
 
     outProcMods = (PRTL_PROCESS_MODULES)ExAllocatePool(NonPagedPool, size);
     if (!outProcMods) {
-        KdPrint(("[NOMAD] [ERROR] Insufficient memory in the free pool to satisfy the request"));
+        LogError(("Insufficient memory in the free pool to satisfy the request"));
         return STATUS_UNSUCCESSFUL;
     }
 
     if (!NT_SUCCESS(status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, outProcMods, size, 0))) {
-        KdPrint(("[NOMAD] [ERROR] ZwQuerySystemInformation failed"));
+        LogError(("ZwQuerySystemInformation failed"));
         ExFreePool(outProcMods);
         return status;
     }
 
-    KdPrint(("[NOMAD][INFO] Using ZwQuerySystemInformation with SYSTEM_MODULE_INFORMATION.  Modules->NumberOfModules = %lu\n", outProcMods->NumberOfModules));
+    KdPrint(("Using ZwQuerySystemInformation with SYSTEM_MODULE_INFORMATION.  Modules->NumberOfModules = %lu\n", outProcMods->NumberOfModules));
 
     for (ULONG i = 0; i < outProcMods->NumberOfModules; i++)
     {
-        //KdPrint(("[NOMAD] [TEST] PRINT TEST\n"));
-        KdPrint(("[NOMAD] [INFO] Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName));
-        KdPrint(("[NOMAD] [INFO] Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase));
-        KdPrint(("[NOMAD] [INFO] Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase));
-        KdPrint(("[NOMAD] [INFO] Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount));
-        KdPrint(("[NOMAD] [INFO] Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize));
-
-        //char* fileName = (char*)(outProcMods->Modules[i].FullPathName + outProcMods->Modules[i].OffsetToFileName);
-        //KdPrint(("[NOMAD] [INFO] fileName == %s\n", fileName));
-        //char* ret = strstr((char*)Modules->Modules[i].FullPathName + outProcMods->Modules[i].OffsetToFileName, ModuleName);
-
-        //if (!ret)
-        //    continue;
-        //else {
-        //    KdPrint(("[NOMAD] [INFO] Found Requested Module %s\n", fileName));
-        //    *ModuleInfo = Modules->Modules[i];
-        //    break;
+        LogInfo(("Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName));
+        LogInfo(("Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase));
+        LogInfo(("Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase));
+        LogInfo(("Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount));
+        LogInfo(("Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize));
     }
 
-    KdPrint(("[NOMAD][INFO] Using ZwQuerySystemInformation complete\n"));
-    //ExFreePool(Modules);
+    LogInfo(("ZwQuerySystemInformation complete\n"));
+    ExFreePool(outProcMods);
+    return STATUS_SUCCESS;
+}
+
+// TODO
+//NTSTATUS EnumSysThreadInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
+//    ULONG size = NULL;
+//    outProcMods = NULL;
+//
+//    // test our pointer
+//    NTSTATUS status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, 0, 0, &size);
+//    if (STATUS_INFO_LENGTH_MISMATCH == status) {
+//        KdPrint(("[NOMAD] [INFO] ZwQuerySystemInformation test successed, status: %08x", status));
+//    }
+//    else
+//    {
+//        KdPrint(("[NOMAD] [ERROR] Unexpected value from ZwQuerySystemInformation, status: %08x", status));
+//        return status;
+//    }
+//
+//    outProcMods = (PRTL_PROCESS_MODULES)ExAllocatePool(NonPagedPool, size);
+//    if (!outProcMods) {
+//        KdPrint(("[NOMAD] [ERROR] Insufficient memory in the free pool to satisfy the request"));
+//        return STATUS_UNSUCCESSFUL;
+//    }
+//
+//    if (!NT_SUCCESS(status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, outProcMods, size, 0))) {
+//        KdPrint(("[NOMAD] [ERROR] ZwQuerySystemInformation failed"));
+//        ExFreePool(outProcMods);
+//        return status;
+//    }
+//
+//    KdPrint(("[NOMAD][INFO] Using ZwQuerySystemInformation with SYSTEM_MODULE_INFORMATION.  Modules->NumberOfModules = %lu\n", outProcMods->NumberOfModules));
+//
+//    for (ULONG i = 0; i < outProcMods->NumberOfModules; i++)
+//    {
+//        KdPrint(("[NOMAD] [INFO] Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName));
+//        KdPrint(("[NOMAD] [INFO] Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase));
+//        KdPrint(("[NOMAD] [INFO] Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase));
+//        KdPrint(("[NOMAD] [INFO] Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount));
+//        KdPrint(("[NOMAD] [INFO] Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize));
+//
+//        //char* fileName = (char*)(outProcMods->Modules[i].FullPathName + outProcMods->Modules[i].OffsetToFileName);
+//        //KdPrint(("[NOMAD] [INFO] fileName == %s\n", fileName));
+//        //char* ret = strstr((char*)Modules->Modules[i].FullPathName + outProcMods->Modules[i].OffsetToFileName, ModuleName);
+//
+//        //if (!ret)
+//        //    continue;
+//        //else {
+//        //    KdPrint(("[NOMAD] [INFO] Found Requested Module %s\n", fileName));
+//        //    *ModuleInfo = Modules->Modules[i];
+//        //    break;
+//    }
+//
+//    KdPrint(("[NOMAD][INFO] Using ZwQuerySystemInformation complete\n"));
+//    //ExFreePool(Modules);
+//    return STATUS_SUCCESS;
+//}
+
+PLOAD_IMAGE_NOTIFY_ROUTINE ImageNotifyRoutine(PUNICODE_STRING FullImageName, HANDLE ProcID, PIMAGE_INFO ImageInfo)
+{
+    UNREFERENCED_PARAMETER(ImageInfo);
+    UNREFERENCED_PARAMETER(ProcID);
+
+    if (wcsstr(FullImageName->Buffer, L"\\EasyAntiCheat.sys"))
+    {
+        //KdPrint(("[NOMAD] [INFO] !  Dumping!\n"));
+        //UINT64 base = (UINT64)ImageInfo->ImageBase;
+        //DumpKernelModule("WinKernelProgDrv.sys");
+    }
+
     return STATUS_SUCCESS;
 }
