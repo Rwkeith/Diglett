@@ -1,9 +1,7 @@
-﻿// From winnnt.h
+﻿// From winnnth  Use this for redefinition issues.
 #pragma once
 #define IMAGE_NUMBEROF_DIRECTORY_ENTRIES    16
 #define IMAGE_SIZEOF_SHORT_NAME              8
-#define E_MAGIC 0x5A4D
-#define NT_HDR_SIG 0x4550
 
 typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
 	WORD   e_magic;                     // Magic number
@@ -28,7 +26,7 @@ typedef struct _IMAGE_DOS_HEADER {      // DOS .EXE header
 } IMAGE_DOS_HEADER, * PIMAGE_DOS_HEADER;
 
 typedef struct _IMAGE_SECTION_HEADER {
-	BYTE  Name[8];
+	BYTE  Name[IMAGE_SIZEOF_SHORT_NAME];
 	union {
 		DWORD PhysicalAddress;
 		DWORD VirtualSize;
@@ -58,68 +56,51 @@ typedef struct _IMAGE_FILE_HEADER {
 	WORD    Characteristics;
 } IMAGE_FILE_HEADER, * PIMAGE_FILE_HEADER;
 
-typedef struct _IMAGE_OPTIONAL_HEADER64 {
-	WORD        Magic;
-	BYTE        MajorLinkerVersion;
-	BYTE        MinorLinkerVersion;
-	DWORD       SizeOfCode;
-	DWORD       SizeOfInitializedData;
-	DWORD       SizeOfUninitializedData;
-	DWORD       AddressOfEntryPoint;
-	DWORD       BaseOfCode;
-	ULONGLONG   ImageBase;
-	DWORD       SectionAlignment;
-	DWORD       FileAlignment;
-	WORD        MajorOperatingSystemVersion;
-	WORD        MinorOperatingSystemVersion;
-	WORD        MajorImageVersion;
-	WORD        MinorImageVersion;
-	WORD        MajorSubsystemVersion;
-	WORD        MinorSubsystemVersion;
-	DWORD       Win32VersionValue;
-	DWORD       SizeOfImage;
-	DWORD       SizeOfHeaders;
-	DWORD       CheckSum;
-	WORD        Subsystem;
-	WORD        DllCharacteristics;
-	ULONGLONG   SizeOfStackReserve;
-	ULONGLONG   SizeOfStackCommit;
-	ULONGLONG   SizeOfHeapReserve;
-	ULONGLONG   SizeOfHeapCommit;
-	DWORD       LoaderFlags;
-	DWORD       NumberOfRvaAndSizes;
-	IMAGE_DATA_DIRECTORY DataDirectory[16];
-} IMAGE_OPTIONAL_HEADER64, * PIMAGE_OPTIONAL_HEADER64;
+typedef struct _IMAGE_OPTIONAL_HEADER {
+    //
+    // Standard fields.
+    //
 
-typedef struct _IMAGE_NT_HEADERS64 {
-	DWORD Signature;
-	IMAGE_FILE_HEADER FileHeader;
-	IMAGE_OPTIONAL_HEADER64 OptionalHeader;
-} IMAGE_NT_HEADERS64, * PIMAGE_NT_HEADERS64;
+    WORD    Magic;
+    BYTE    MajorLinkerVersion;
+    BYTE    MinorLinkerVersion;
+    DWORD   SizeOfCode;
+    DWORD   SizeOfInitializedData;
+    DWORD   SizeOfUninitializedData;
+    DWORD   AddressOfEntryPoint;
+    DWORD   BaseOfCode;
+    DWORD   BaseOfData;
 
-typedef struct _IMAGE_EXPORT_DIRECTORY {
-	DWORD   Characteristics;
-	DWORD   TimeDateStamp;
-	WORD    MajorVersion;
-	WORD    MinorVersion;
-	DWORD   Name;
-	DWORD   Base;
-	DWORD   NumberOfFunctions;
-	DWORD   NumberOfNames;
-	DWORD   AddressOfFunctions;
-	DWORD   AddressOfNames;
-	DWORD   AddressOfNameOrdinals;
-} IMAGE_EXPORT_DIRECTORY, * PIMAGE_EXPORT_DIRECTORY;
+    //
+    // NT additional fields.
+    //
 
-typedef struct _SYSTEM_MODULE_ENTRY {
-	ULONG  Unused;
-	ULONG  Always0;
-	PVOID  ModuleBaseAddress;
-	ULONG  ModuleSize;
-	ULONG  Unknown;
-	ULONG  ModuleEntryIndex;
-	USHORT ModuleNameLength;
-	USHORT ModuleNameOffset;
-	CHAR   ModuleName[256];
-} SYSTEM_MODULE_ENTRY, * PSYSTEM_MODULE_ENTRY;		// using https://doxygen.reactos.org/da/dda/filesystems_2udfs_2Include_2ntddk__ex_8h_source.html#l00074
+    DWORD   ImageBase;
+    DWORD   SectionAlignment;
+    DWORD   FileAlignment;
+    WORD    MajorOperatingSystemVersion;
+    WORD    MinorOperatingSystemVersion;
+    WORD    MajorImageVersion;
+    WORD    MinorImageVersion;
+    WORD    MajorSubsystemVersion;
+    WORD    MinorSubsystemVersion;
+    DWORD   Win32VersionValue;
+    DWORD   SizeOfImage;
+    DWORD   SizeOfHeaders;
+    DWORD   CheckSum;
+    WORD    Subsystem;
+    WORD    DllCharacteristics;
+    DWORD   SizeOfStackReserve;
+    DWORD   SizeOfStackCommit;
+    DWORD   SizeOfHeapReserve;
+    DWORD   SizeOfHeapCommit;
+    DWORD   LoaderFlags;
+    DWORD   NumberOfRvaAndSizes;
+    IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
+} IMAGE_OPTIONAL_HEADER32, * PIMAGE_OPTIONAL_HEADER32;
 
+typedef struct _IMAGE_NT_HEADERS {
+    DWORD Signature;
+    IMAGE_FILE_HEADER FileHeader;
+    IMAGE_OPTIONAL_HEADER32 OptionalHeader;
+} IMAGE_NT_HEADERS, *PPIMAGE_NT_HEADERS;

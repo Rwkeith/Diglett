@@ -7,33 +7,156 @@
 //#include "asmstubs.h"
 
 PRTL_PROCESS_MODULES outProcMods = NULL;
+DevCtrlPtr origDeviceControl = NULL;
+volatile bool runThread = true;
+uintptr_t kernBase = NULL;
+
+bool IsValidPEHeader(_In_ const uintptr_t pHead)
+{
+    // ideally should parse the PT so this can't be IAT spoofed
+    if (!MmIsAddressValid((PVOID)pHead))
+    {
+#ifdef VERBOSE_LOG
+        LogError("Was unable to read page @ 0x%p", (PVOID)pHead);
+#endif
+        return false;
+    }
+
+    if (!pHead)
+    {
+        LogInfo("pHead is null @ 0x%p", (PVOID)pHead);
+        return false;
+    }
+
+    if (reinterpret_cast<PIMAGE_DOS_HEADER>(pHead)->e_magic != E_MAGIC)
+    {
+        //LogInfo("pHead is != 0x%02x @ %p", E_MAGIC, (PVOID)pHead);
+        return false;
+    }
+
+    const auto ntHeader = reinterpret_cast<PIMAGE_NT_HEADERS64>(pHead + reinterpret_cast<PIMAGE_DOS_HEADER>(pHead)->e_lfanew);
+
+    // avoid reading a page not paged in
+    if (reinterpret_cast<PIMAGE_DOS_HEADER>(pHead)->e_lfanew > 0x1000)
+    {
+        LogInfo("pHead->e_lfanew > 0x1000 , doesn't seem valid @ 0x%p", (PVOID)pHead);
+        return false;
+    }
+
+    if (ntHeader->Signature != NT_HDR_SIG)
+    {
+        LogInfo("ntHeader->Signature != 0x%02x @ 0x%p", NT_HDR_SIG, (PVOID)pHead);
+        return false;
+    }
+
+    LogInfo("Found valid PE header @ 0x%p", (PVOID)pHead);
+    return true;
+}
+
+
+// @ Barakat , GS Register, reverse page walk until MZ header of ntos
+// https://gist.github.com/Barakat/34e9924217ed81fd78c9c92d746ec9c6
+// Lands above nt module, but can page fault! Tweak to check PTE's instead of using MmIsAddressValid.  Refer to:  https://www.unknowncheats.me/forum/anti-cheat-bypass/437451-whats-proper-write-read-physical-memory.html
+uintptr_t GetNtoskrnlBaseAddress()
+{
+#pragma pack(push, 1)
+    typedef struct
+    {
+        UCHAR Padding[4];
+        PVOID InterruptServiceRoutine;
+    } IDT_ENTRY;
+#pragma pack(pop)
+
+    // Find the address of IdtBase using gs register.
+    const auto idt_base = reinterpret_cast<IDT_ENTRY*>(__readgsqword(0x38));
+
+    // Find the address of the first (or any) interrupt service routine.
+    const auto first_isr_address = idt_base[0].InterruptServiceRoutine;
+
+    // Align the address on page boundary.
+    auto pageInNtoskrnl = reinterpret_cast<uintptr_t>(first_isr_address) & ~static_cast<uintptr_t>(0xfff);
+
+    // Traverse pages backward until we find the PE signature (MZ) of ntoskrnl.exe in the beginning of some page.
+    while (!IsValidPEHeader(pageInNtoskrnl))
+    {
+        pageInNtoskrnl -= 0x1000;
+    }
+
+    // Now we have the base address of ntoskrnl.exe
+    return pageInNtoskrnl;
+}
+
 
 extern "C" NTSTATUS DriverEntry()
 {
     Log("DriverEntry() Starting Diglett!\n");
 
-    LogInfo("Setting LoadImageNotify routine\n");
-    PsSetLoadImageNotifyRoutine((PLOAD_IMAGE_NOTIFY_ROUTINE)ImageNotifyRoutine);
+    //LogInfo("Setting LoadImageNotify routine\n");
+    //PsSetLoadImageNotifyRoutine((PLOAD_IMAGE_NOTIFY_ROUTINE)ImageNotifyRoutine);
     
     // Diglett is not legit, he doesn't create a device object :(
 
-    wchar_t* apiNames[WINAPI_IMPORT_COUNT] = { L"ZwQuerySystemInformation" };
-    //PVOID pWinPrims[WINAPI_IMPORT_COUNT];
-    GenericFuncPtr(pWinPrims[WINAPI_IMPORT_COUNT]);
-    NTSTATUS status = ImportWinPrimitives(pWinPrims, apiNames);
-    if (!NT_SUCCESS(status))
-    {
-        LogError("Importing windows primitives failed.  Aborting task\n");
-        return STATUS_SUCCESS;
-    }
+    //wchar_t* apiNames[WINAPI_IMPORT_COUNT] = { L"ZwQuerySystemInformation" };
+    ////PVOID pWinPrims[WINAPI_IMPORT_COUNT];
+    //GenericFuncPtr(pWinPrims[WINAPI_IMPORT_COUNT]);
+    //NTSTATUS status = ImportWinPrimitives(pWinPrims, apiNames);
+    //if (!NT_SUCCESS(status))
+    //{
+    //    LogError("Importing windows primitives failed.  Aborting task\n");
+    //    return STATUS_SUCCESS;
+    //}
 
-    EnumKernelModuleInfo((ZwQuerySysInfoPtr)pWinPrims[ZW_QUERY_INFO]);
-    
-    // All checks complete
-    LogInfo("All checks passed.  Nothing suspicious.\n");
+    //EnumKernelModuleInfo((ZwQuerySysInfoPtr)pWinPrims[ZW_QUERY_INFO]);
+    //SetHk_tcpip(true);
 
-    LogInfo(("~DriverEntry()\n"));
+    kernBase = GetNtoskrnlBaseAddress();
+
+    HANDLE threadHandle;
+    PsCreateSystemThread(&threadHandle, GENERIC_ALL, 0, 0, 0, MainThread, 0);
+    ZwClose(threadHandle);
+    LogInfo("~DriverEntry()\n");
     return STATUS_SUCCESS;
+}
+
+extern "C" void MainThread(PVOID StartContext)
+{
+    LogInfo("Allocated using MDL method with mapper");
+
+    int increment = 0;
+    LogInfo("runThread == True, looping thread\n");
+    HANDLE ourThread = PsGetCurrentThreadId();
+    LogInfo("Our thread id:  %llu\n", (unsigned long long)ourThread);
+    KIRQL currIrql = KeGetCurrentIrql();
+    LogInfo("Current Irql before KeDelayExecutionThread: %d", currIrql);
+    auto cpuIndex = KeGetCurrentProcessorNumber();
+    LogInfo("Running on CPU: %lu", cpuIndex);
+    
+    PKTHREAD thisThread = (PKTHREAD)__readgsqword(0x188);
+
+    LogInfo("Hiding system thread:");
+    thisThread = reinterpret_cast<PKTHREAD>(KeGetCurrentThread());
+    LogInfo("\t\t\tKTHREAD->SystemThread = %lu", thisThread->SystemThread);
+    thisThread->SystemThread = 0;
+    LogInfo("\t\t\tKTHREAD->SystemThread = %lu", thisThread->SystemThread);
+
+    LogInfo("Spoofing thread entry point:");
+    _ETHREAD* myThread = reinterpret_cast<_ETHREAD*>(thisThread);
+    LogInfo("\t\t\t_ETHREAD->StartAddress = %p", myThread->StartAddress);
+    uintptr_t inNtosText = kernBase + 0x3000;
+    myThread->StartAddress = (PVOID)inNtosText;
+    LogInfo("\t\t\t_ETHREAD->StartAddress = %p", myThread->StartAddress);
+    LogInfo("\t\t\t_ETHREAD->Win32StartAddress = %p", myThread->Win32StartAddress);
+    myThread->Win32StartAddress = (PVOID)inNtosText;
+    LogInfo("\t\t\t_ETHREAD->Win32StartAddress = %p", myThread->Win32StartAddress);
+
+    while (runThread)
+    {
+        LARGE_INTEGER li;
+        //li.QuadPart = -10000; // 1 ms delay
+        li.QuadPart = -10000000;
+        KeDelayExecutionThread(KernelMode, FALSE, &li);
+    }
+    LogInfo("runThread == False, exiting thread\n");
 }
 
 /// <summary>
@@ -58,60 +181,107 @@ NTSTATUS ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), _In_ wchar_t* na
         pWinPrims[i] = (GenericFuncPtr)MmGetSystemRoutineAddress(&uniNames[i]);
         if (pWinPrims[i] == NULL)
         {
-            LogError(("Failed to import %s\n", (unsigned char*)ansiImportName));
+            LogError("Failed to import %ls\n", uniNames[i].Buffer);
             return STATUS_UNSUCCESSFUL;
         }
         else
         {
-            LogInfo(("Succesfully imported %ls at %p\n", uniNames[i].Buffer, pWinPrims[i]));
+            LogInfo("Succesfully imported %ls at %p\n", uniNames[i].Buffer, pWinPrims[i]);
         }
     }
     return STATUS_SUCCESS;
 }
 
-// TODO, Communication method via hook in legit driver Device Control handler.  (probably will hook the Create IRP_MJ_CREATE
-//NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT, PIRP Irp)
-//{
-//    auto status = STATUS_SUCCESS;
-//
-//    switch (stack->Parameters.DeviceIoControl.IoControlCode)
-//    {
-//    case IOCTL_DUMP_KERNEL_MODULE: {
-//        // do the work
-//        if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(MD_MODULE_DATA))
-//        {
-//            status = STATUS_BUFFER_TOO_SMALL;
-//            break;
-//        }
-//
-//        auto data = (PMD_MODULE_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
-//
-//        if (data == nullptr)
-//        {
-//            status = STATUS_INVALID_PARAMETER;
-//            break;
-//        }
-//
-//        //status = DumpKernelModule(data->moduleName);
-//        //if (!NT_SUCCESS(status))
-//        //{
-//        //    KdPrint(("[NOMAD] [ERROR] Failed to dump kernel module\n"));
-//        //    break;
-//        //}
-//
-//        LogInfo(("Successfully dumped kernel module\n"));
-//        break;
-//    }
-//    default:
-//        status = STATUS_INVALID_DEVICE_REQUEST;
-//        break;
-//    }
-//
-//    Irp->IoStatus.Status = status;
-//    Irp->IoStatus.Information = 0;
-//    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-//    return status;
-//}
+// Communication method via hook in legit driver control handler
+NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT tcpipDevObj, PIRP Irp)
+{
+    LogInfo("Hooked routine executed!\n");
+
+    // In the context of tcpip thread
+    auto stack = IoGetCurrentIrpStackLocation(Irp);
+    auto status = STATUS_SUCCESS;
+
+    switch (stack->Parameters.DeviceIoControl.IoControlCode)
+    {
+    case IOCTL_ECHO_REQUEST: {
+        LogInfo("IOCTL_ECHO_REQUEST received!!\n");
+        if (stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(ECHO_DATA))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        auto data = (PECHO_DATA)stack->Parameters.DeviceIoControl.Type3InputBuffer;
+
+        if (data == nullptr)
+        {
+            status = STATUS_SUCCESS; // <- TEST
+            //status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        LogInfo("Echo request output: %s\n", data->strEcho);
+        Irp->IoStatus.Status = CUSTOM_STATUS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return CUSTOM_STATUS;
+    }
+    default:
+        LogInfo("Unrecognized IoControlCode, forwarding to original DeviceControl.\n");
+        return origDeviceControl(tcpipDevObj, Irp);
+    }
+
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
+/* hook/unhook driver */
+NTSTATUS SetHk_tcpip(_In_ BOOLEAN hook)
+{
+    LogInfo("Hooking tcpip device control...\n");
+    UNICODE_STRING drvName;
+    UNICODE_STRING newDrvName;
+    //PDRIVER_OBJECT tcpipDrvObj;
+    DRIVER_OBJECT myDummyDriver;
+    PDEVICE_OBJECT tcpipDevice;
+    PDRIVER_OBJECT tcpipDriver;
+    NTSTATUS status;
+    PDRIVER_OBJECT dummyDriver;
+    //HANDLE fileHandle;
+    //UNICODE_STRING fileName = RTL_CONSTANT_STRING(L"\\DosDevices\\C:\\\\Windows\\System32\\drivers\\tcpip.sys");
+    //OBJECT_ATTRIBUTES objAttr;
+    //IO_STATUS_BLOCK ioStatusBlock;
+
+    //RtlInitUnicodeString(&drvName, L"\\Driver\\tcpip");
+    RtlInitUnicodeString(&drvName, L"\\Driver\\tcpip");
+    RtlInitUnicodeString(&newDrvName, L"\\Driver\\newDrvName");
+    //EXISTING
+    //InitializeObjectAttributes(&objAttr, &fileName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    //status = ZwCreateFile(&fileHandle, GENERIC_WRITE, &objAttr, &ioStatusBlock, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    //if (status != STATUS_SUCCESS)
+    //{
+    //    LogError("ZwCreateFile failed status:  0x%08x\n", status);
+    //    return status;
+    //}
+
+    //tcpipDevice = IoGetRelatedDeviceObject();
+
+    // Create our own dummy driver
+    // name is spoofed?
+    IoCreateDriver(&newDrvName, (PDRIVER_INITIALIZE)DummyDrv_Init);
+    //status = ObReferenceObjectByName(&newDrvName, OBJ_CASE_INSENSITIVE, NULL, 0,
+    //    *IoDriverObjectType, KernelMode, NULL, (PVOID*)&dummyDriver);
+
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS DummyDrv_Init(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
+{
+    return STATUS_SUCCESS;
+}
 
 /*
 * WIP to manually parse PTE entries
@@ -135,117 +305,12 @@ bool IsValidPTE(PVOID VirtAddress)
 }
 */
 
-//NTSTATUS DumpKernelModule(_In_ char* moduleName) {
-//
-//    RTL_PROCESS_MODULE_INFORMATION ModuleInfo;
-//    NTSTATUS status = EnumKernelModuleInfo(moduleName, &ModuleInfo);
-//
-//    if (!NT_SUCCESS(status)) {
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//    KdPrint(("[NOMAD] [INFO] RTL_PROCESS_MODULE_INFORMATION DEBUG INFO\n"));
-//    KdPrint(("[NOMAD] [INFO] ModuleInfo.ImageSize: 0x%lx\n", ModuleInfo.ImageSize));
-//    KdPrint(("[NOMAD] [INFO] ModuleInfo.ImageBase: 0x%p\n", ModuleInfo.ImageBase));
-//    KdPrint(("[NOMAD] [INFO] ModuleInfo.FullPathName: 0x%s\n", ModuleInfo.FullPathName));
-//    KdPrint(("[NOMAD] [INFO] ModuleInfo.MappedBase: 0x%p\n", ModuleInfo.MappedBase));
-//    KdPrint(("[NOMAD] [INFO] ModuleInfo.Section: 0x%p\n", ModuleInfo.Section));
-//
-//
-//    //PVOID byteBuffer = ExAllocatePool(NonPagedPool, ModuleInfo.ImageSize);
-//    PVOID byteBuffer = ExAllocatePoolZero(NonPagedPool, ModuleInfo.ImageSize, 0x4A4A4A4A);
-//    PVOID byteBufferBase = byteBuffer;
-//    if (!byteBuffer) {
-//        KdPrint(("[NOMAD] [ERROR] Failed to allocate pool\n"));
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//
-//    MM_COPY_ADDRESS mmCopyAddress;
-//    MM_COPY_ADDRESS mmCurrCopyAddr;
-//    mmCopyAddress.VirtualAddress = ModuleInfo.ImageBase;
-//    mmCurrCopyAddr.VirtualAddress = ModuleInfo.ImageBase;
-//    size_t numOfBytesCopied = 0;
-//    
-//    size_t remainingBytes = ModuleInfo.ImageSize;
-//    size_t incrementVal = PAGE_SIZE;
-//    size_t totalBytesCopied = 0;
-//    PVOID finalAddress = ((BYTE*)mmCopyAddress.VirtualAddress + ModuleInfo.ImageSize);
-//
-//    if (ModuleInfo.ImageSize < PAGE_SIZE)
-//    {
-//        KdPrint(("[NOMAD] [ERROR] ImageSize shouldn't be less than a page in size.  Halting operation\n"));
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//
-//    KdPrint(("[NOMAD] [INFO] Starting MmCopyMemory Routine from %p to %p\n", mmCopyAddress.VirtualAddress, finalAddress));
-//    while (mmCopyAddress.VirtualAddress < finalAddress)
-//    {
-//        bool isValid = MmIsAddressValid(mmCopyAddress.VirtualAddress);
-//        if (isValid)
-//        {
-//            KdPrint(("[NOMAD] [INFO] MmIsAddressValid found valid page at %p\n", mmCopyAddress.VirtualAddress));
-//            // read it
-//            status = MmCopyMemory(byteBuffer, mmCopyAddress, PAGE_SIZE, MM_COPY_MEMORY_VIRTUAL, (PSIZE_T)&numOfBytesCopied);
-//            if (!NT_SUCCESS(status))
-//            {
-//                KdPrint(("[NOMAD] [WARN] Failed to copy bytes at address: %p\n", mmCopyAddress.VirtualAddress));
-//                KdPrint(("[NOMAD] [WARN] MmCopyMemory() NTSTATUS: STATUS_ACCESS_VIOLATION.  Handling by filling invalid pages with 00's\n"));
-//                goto makeBlank;
-//            }
-//
-//            byteBuffer = ((BYTE*)byteBuffer + incrementVal);
-//            totalBytesCopied += incrementVal;
-//            mmCopyAddress.VirtualAddress = ((BYTE*)mmCopyAddress.VirtualAddress + incrementVal);
-//            remainingBytes -= incrementVal;
-//            continue;
-//        }
-//        else {
-//            // make a blank page
-//            KdPrint(("[NOMAD] [WARN] MmIsAddressValid invalid page: %p\n", mmCopyAddress.VirtualAddress));
-//        makeBlank:
-//            RtlSecureZeroMemory(byteBuffer, PAGE_SIZE);
-//            byteBuffer = ((BYTE*)byteBuffer + incrementVal);
-//            totalBytesCopied += incrementVal;
-//            mmCopyAddress.VirtualAddress = ((BYTE*)mmCopyAddress.VirtualAddress + incrementVal);
-//            remainingBytes -= incrementVal;
-//        }
-//    }
-//    KdPrint(("[NOMAD] [INFO] Copied memory range from %p to %p into buffer at %p\n", ModuleInfo.ImageBase, mmCopyAddress.VirtualAddress, byteBufferBase));
-//    KdPrint(("[NOMAD] [INFO] Number of bytes copied: %zu\n", totalBytesCopied));
-//    HANDLE fileHandle = NULL;
-//    UNICODE_STRING fileName = RTL_CONSTANT_STRING(L"\\DosDevices\\C:\\DumpedDriver.sys");
-//    OBJECT_ATTRIBUTES objAttr;
-//    IO_STATUS_BLOCK ioStatusBlock;
-//
-//    InitializeObjectAttributes(&objAttr, &fileName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
-//
-//    if (!NT_SUCCESS(ZwCreateFile(&fileHandle, GENERIC_WRITE, &objAttr, &ioStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0))) {
-//        KdPrint(("[NOMAD] [ERROR] Failed to create file\n"));
-//        //ExFreePool(byteBufferBase);
-//        ExFreePoolWithTag(byteBufferBase, 0x4A4A4A4A);
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//
-//    if (!NT_SUCCESS(ZwWriteFile(fileHandle, NULL, NULL, NULL, &ioStatusBlock, byteBufferBase, ModuleInfo.ImageSize, NULL, NULL))) {
-//        KdPrint(("[NOMAD] [ERROR] Failed to write to file!\n"));
-//        //ExFreePool(byteBufferBase);
-//        ExFreePoolWithTag(byteBufferBase, 0x4A4A4A4A);
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//
-//    KdPrint(("[NOMAD] [INFO] %s was saved \n", moduleName));
-//    ZwClose(fileHandle);
-//    //ExFreePool(byteBufferBase);
-//    ExFreePoolWithTag(byteBufferBase, 0x4A4A4A4A);
-//    return STATUS_SUCCESS;
-//}
-
 /// <summary>
 /// Uses ZwQuerySysInfo to get legit module ranges
 /// </summary>
 /// <param name="ZwQuerySysInfo">pointer to ZwQuerySystemInformation</param>
 /// <param name="outProcMods">pointer to struct with data out</param>
 /// <returns>status</returns>
-
 NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
     ULONG size = NULL;
     outProcMods = NULL;
@@ -253,22 +318,22 @@ NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
     // test our pointer
     NTSTATUS status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, 0, 0, &size);
     if (STATUS_INFO_LENGTH_MISMATCH == status) {
-        LogError(("ZwQuerySystemInformation test successed, status: %08x", status));
+        LogError("ZwQuerySystemInformation test successed, status: %08x", status);
     }
     else
     {
-        LogError(("Unexpected value from ZwQuerySystemInformation, status: %08x", status));
+        LogError("Unexpected value from ZwQuerySystemInformation, status: %08x", status);
         return status;
     }
 
     outProcMods = (PRTL_PROCESS_MODULES)ExAllocatePool(NonPagedPool, size);
     if (!outProcMods) {
-        LogError(("Insufficient memory in the free pool to satisfy the request"));
+        LogError("Insufficient memory in the free pool to satisfy the request");
         return STATUS_UNSUCCESSFUL;
     }
 
     if (!NT_SUCCESS(status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, outProcMods, size, 0))) {
-        LogError(("ZwQuerySystemInformation failed"));
+        LogError("ZwQuerySystemInformation failed");
         ExFreePool(outProcMods);
         return status;
     }
@@ -277,14 +342,14 @@ NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
 
     for (ULONG i = 0; i < outProcMods->NumberOfModules; i++)
     {
-        LogInfo(("Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName));
-        LogInfo(("Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase));
-        LogInfo(("Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase));
-        LogInfo(("Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount));
-        LogInfo(("Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize));
+        LogInfo("Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName);
+        LogInfo("Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase);
+        LogInfo("Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase);
+        LogInfo("Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount);
+        LogInfo("Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize);
     }
 
-    LogInfo(("ZwQuerySystemInformation complete\n"));
+    LogInfo("ZwQuerySystemInformation complete\n");
     ExFreePool(outProcMods);
     return STATUS_SUCCESS;
 }
