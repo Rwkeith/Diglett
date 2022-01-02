@@ -2,12 +2,9 @@
 #include <ntifs.h>
 #include <windef.h>
 #include <ntstrsafe.h>
-#include <wdm.h>
 #include "PEHdr.h"
-#pragma comment(lib, "ntoskrnl.lib")
-#pragma comment(lib, "win32k.lib")
 
-
+#define LEGIT_DRIVER
 #define DEBUG
 
 // @jk2
@@ -31,7 +28,6 @@
 #define ZW_QUERY_INFO 0
 #define SYSTEM_MODULE_INFORMATION 0x0B
 
-//0x1 bytes (sizeof)
 union _KWAIT_STATUS_REGISTER
 {
     UCHAR Flags;                                                            //0x0
@@ -68,7 +64,6 @@ struct _EX_PUSH_LOCK
     };
 };
 
-//0x18 bytes (sizeof)
 struct _PS_PROPERTY_SET
 {
     struct _LIST_ENTRY ListHead;                                            //0x0
@@ -664,6 +659,10 @@ extern "C"
 		_In_ PDRIVER_INITIALIZE InitializationFunction
 	);
 
+    NTKERNELAPI PVOID PsGetProcessSectionBaseAddress(
+            __in PEPROCESS Process
+    );
+
 	typedef void (*GenericFuncPtr)();
 	typedef NTSTATUS(*ZwQuerySysInfoPtr)(ULONG, PVOID, ULONG, PULONG);
 	typedef NTSTATUS(*DevCtrlPtr)(PDEVICE_OBJECT, PIRP Irp);
@@ -671,12 +670,14 @@ extern "C"
 }
 
 extern "C" __declspec(dllimport) POBJECT_TYPE * IoDriverObjectType;
+//extern "C" NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT, PIRP Irp);
+//extern "C" void MainThread(PVOID StartContext);
 
-NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo);
-NTSTATUS ImportWinPrimitives(_Out_ GenericFuncPtr pWinPrims[], _In_ wchar_t* names[]);
+//NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo);
 PLOAD_IMAGE_NOTIFY_ROUTINE ImageNotifyRoutine(_In_ PUNICODE_STRING FullImageName, _In_ HANDLE ProcID, _In_ PIMAGE_INFO ImageInfo);
-extern "C" NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT, PIRP Irp);
-//NTSTATUS SetHk_tcpip(_In_ BOOLEAN hook);
 NTSTATUS DummyDrv_Init(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath);
 NTSTATUS SetHk_tcpip(_In_ BOOLEAN hook);
-extern "C" void MainThread(PVOID StartContext);
+uintptr_t GetNtoskrnlBaseAddress();
+#ifdef LEGIT_DRIVER
+void Unload(_In_ PDRIVER_OBJECT DriverObject);
+#endif
