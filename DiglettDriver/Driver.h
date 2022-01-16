@@ -4,6 +4,7 @@
 #include <ntstrsafe.h>
 #include "PEHdr.h"
 
+//#define USERLAND_COMMUNICATE
 #define LEGIT_DRIVER
 #define DEBUG
 
@@ -670,14 +671,25 @@ extern "C"
 }
 
 extern "C" __declspec(dllimport) POBJECT_TYPE * IoDriverObjectType;
-//extern "C" NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT, PIRP Irp);
-//extern "C" void MainThread(PVOID StartContext);
 
-//NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo);
 PLOAD_IMAGE_NOTIFY_ROUTINE ImageNotifyRoutine(_In_ PUNICODE_STRING FullImageName, _In_ HANDLE ProcID, _In_ PIMAGE_INFO ImageInfo);
 NTSTATUS DummyDrv_Init(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath);
-NTSTATUS SetHk_tcpip(_In_ BOOLEAN hook);
+NTSTATUS SetHook(BOOL setHook);
+NTSTATUS Hk_Create(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 uintptr_t GetNtoskrnlBaseAddress();
+BOOLEAN Hk_FastIoDispatch(
+    _In_ struct _FILE_OBJECT* FileObject,
+    _In_ BOOLEAN Wait,
+    _In_opt_ PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_opt_ PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _In_ ULONG IoControlCode,
+    _Out_ PIO_STATUS_BLOCK IoStatus,
+    _In_ struct _DEVICE_OBJECT* DeviceObject
+);
+
 #ifdef LEGIT_DRIVER
 void Unload(_In_ PDRIVER_OBJECT DriverObject);
 #endif

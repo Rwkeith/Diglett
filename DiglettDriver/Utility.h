@@ -33,7 +33,10 @@ public:
 	static NTSTATUS WriteProcessMemory(UINT32 pid, PVOID Address, PVOID AllocatedBuffer, SIZE_T size, SIZE_T* written);
 	static NTSTATUS ImportWinPrimitives(_Out_ GenericFuncPtr pWinPrims[], _In_ wchar_t* names[]);
 	static BOOL GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64 outSize);
-	static NTSTATUS Utility::Sleep(_In_ LONG milliseconds);
+	static NTSTATUS Sleep(_In_ LONG milliseconds);
+	NTSTATUS SearchPattern(_In_ PCUCHAR pattern, _In_ UCHAR wildcard, _In_ ULONG_PTR len, _In_ const VOID* base, _In_ ULONG_PTR size, _Out_ PVOID* ppFound);
+	static NTSTATUS SpoofThread();
+	static NTSTATUS UnSpoofThread();
 
 private:
 	PRTL_PROCESS_MODULES outProcMods = NULL;

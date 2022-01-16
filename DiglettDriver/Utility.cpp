@@ -5,7 +5,7 @@
 #include <intrin.h>
 
 
-NTSTATUS Utility::GetProcessBaseAddress(_In_ UINT32 pid, _Out_ PVOID* procBase)
+NTSTATUS Utility::GetProcessBaseAddress(IN UINT32 pid, _Out_ PVOID* procBase)
 {
 	PEPROCESS pProcess = NULL;
 	if (pid == 0)
@@ -225,7 +225,7 @@ NTSTATUS Utility::WriteProcessMemory(UINT32 pid, PVOID Address, PVOID AllocatedB
 /// <param name="pWinPrims">Array that holds WinPrimitive pointers</param>
 /// <param name="names">names of routines to import</param>
 /// <returns></returns>
-NTSTATUS Utility::ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), _In_ wchar_t* names[])
+NTSTATUS Utility::ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), IN wchar_t* names[])
 {
 	LogInfo("Importing windows primitives\n");
 
@@ -252,14 +252,13 @@ NTSTATUS Utility::ImportWinPrimitives(_Out_ GenericFuncPtr(pWinPrims[]), _In_ wc
 	return STATUS_SUCCESS;
 }
 
-NTSTATUS Utility::Sleep(_In_ LONG milliseconds)
+NTSTATUS Utility::Sleep(IN LONG milliseconds)
 {
 	LARGE_INTEGER interval;
 	interval.QuadPart = -(10ll * milliseconds);
 
 	return KeDelayExecutionThread(KernelMode, FALSE, &interval);
 }
-
 
 BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64 outSize)
 {
@@ -272,7 +271,7 @@ BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64
 		return false;
 	}
 	LogInfo("\nPEPROCESS: 0x%p", process);
-		
+
 	// virtual address is in context of that process
 
 	const auto peb = PsGetProcessPeb(process);
@@ -323,16 +322,16 @@ BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64
 	//LogInfo("head->Flink: %p", head->Flink);
 	PLDR_DATA_TABLE_ENTRY entry;
 	int i = 0;
-//	KIRQL oldIrql = KeGetCurrentIrql();
+	//KIRQL oldIrql = KeGetCurrentIrql();
 	// IRQL_NOT_LESS_OR_EQUAL
-	
+
 //	__writecr8(0xF);
 	//auto oldIrql = KeRaiseIrqlToDpcLevel();
 	//_disable();
 //	LogInfo("oldIrql: %d", oldIrql);
-	
+
 	//__writecr3(games_cr3);
-	
+
 	//LogInfo("head->Flink: %p", head->Flink);
 	//next = head->Flink;
 	//entry = (PLDR_DATA_TABLE_ENTRY)next;
@@ -345,7 +344,26 @@ BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64
 	//LogInfo("head->Flink: %wZ", &(((PLDR_DATA_TABLE_ENTRY)head)->FullDllName));
 	//__writecr3(games_cr3);
 	KAPC_STATE ApcState;
-
+#ifndef LEGIT_DRIVER
+	auto oldIrql = KeGetCurrentIrql();
+	__writecr8(0xF);
+	__writecr3(games_cr3);
+	__try
+	{
+		for (next = head->Flink; next != head; next = next->Flink) {
+			// Check if BaseDllName matches our target
+			entry = (PLDR_DATA_TABLE_ENTRY)next;
+			LogInfo("entry->FullDllName: %wZ", &(entry->FullDllName));
+			LogInfo("entry->DllBase: %p", &(entry->DllBase));
+		}
+	}
+	__except (GetExceptionCode() == STATUS_ACCESS_VIOLATION)
+	{
+		LogInfo("Custom SEH for STATUS_ACCESS_VIOLATION executed");
+	}
+	__writecr3(calling_process_cr3);
+	__writecr8(oldIrql);
+#else
 	KeStackAttachProcess(process, &ApcState);
 
 	for (next = head->Flink; next != head; next = next->Flink) {
@@ -359,9 +377,12 @@ BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64
 	//const auto size = (size_t)cur_entry->SizeOfImage;
 
 	// Detach, we are now back in the address space of our calling process
-	
+
 	KeUnstackDetachProcess(&ApcState);
-	
+#endif // LEGIT_DRIVER
+
+
+
 	//LogInfo("Thread dies? 1");
 	//__writecr3(calling_process_cr3);
 	//_enable();
@@ -371,4 +392,42 @@ BOOL Utility::GetUserModBase(PCHAR modName, UINT64 pid, PUINT64 outBase, PUINT64
 	//*outBase = base;
 	//*outSize = size;
 	return true;
+}
+
+/// <summary>
+/// Search for pattern https://github.com/DarthTon/Blackbone/blob/a672509b5458efeb68f65436259b96fa8cd4dcfc/src/BlackBoneDrv/Utils.c#L199
+/// </summary>
+/// <param name="pattern">Pattern to search for</param>
+/// <param name="wildcard">Used wildcard</param>
+/// <param name="len">Pattern length</param>
+/// <param name="base">Base address for searching</param>
+/// <param name="size">Address range to search in</param>
+/// <param name="ppFound">Found location</param>
+/// <returns>Status code</returns>
+NTSTATUS Utility::SearchPattern(IN PCUCHAR pattern, IN UCHAR wildcard, IN ULONG_PTR len, IN const VOID* base, IN ULONG_PTR size, _Out_ PVOID* ppFound)
+{
+	ASSERT(ppFound != NULL && pattern != NULL && base != NULL);
+	if (ppFound == NULL || pattern == NULL || base == NULL)
+		return STATUS_INVALID_PARAMETER;
+
+	for (ULONG_PTR i = 0; i < size - len; i++)
+	{
+		BOOLEAN found = TRUE;
+		for (ULONG_PTR j = 0; j < len; j++)
+		{
+			if (pattern[j] != wildcard && pattern[j] != ((PCUCHAR)base)[i + j])
+			{
+				found = FALSE;
+				break;
+			}
+		}
+
+		if (found != FALSE)
+		{
+			*ppFound = (PUCHAR)base + i;
+			return STATUS_SUCCESS;
+		}
+	}
+
+	return STATUS_NOT_FOUND;
 }

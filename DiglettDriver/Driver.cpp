@@ -2,6 +2,17 @@
 #include "Utility.h"
 #include "Driver.h"
 #include "Common.h"
+#include "Draw.h"
+
+void* gOriginalDispatchFunctionArray[IRP_MJ_MAXIMUM_FUNCTION];
+PFAST_IO_DEVICE_CONTROL gOriginalFastIoControl = NULL;
+
+namespace DiglettDrv
+{
+    void* gKernBase;
+    bool gRunThread;
+}
+
 
 #ifdef LEGIT_DRIVER
     NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
@@ -9,13 +20,11 @@
     extern "C" NTSTATUS DriverEntry()
 #endif // LEGIT_DRIVER
 {
+        DiglettDrv::gKernBase = (void*)GetNtoskrnlBaseAddress();
 #ifdef LEGIT_DRIVER
         UNREFERENCED_PARAMETER(RegistryPath);
         Log("DriverEntry() Starting Diglett as legit driver!");
-        // map major function handlers
-        //DriverObject->MajorFunction[IRP_MJ_CREATE] = Create;
-        //DriverObject->MajorFunction[IRP_MJ_CLOSE] = Close;
-        //DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DeviceControl;
+        Log("Current IRQL: %d", (int)KeGetCurrentIrql());
         DriverObject->DriverUnload = Unload;
 
         // Create a device object for the usermode application to use
@@ -38,7 +47,7 @@
         // error check for sym link creation
         if (!NT_SUCCESS(status))
         {
-            LogError("Failed to create symbolic link (0x%08X)\n", status);
+            LogError("Failed to create symbolic link (0x%08X)", status);
             IoDeleteDevice(DeviceObject);
             return status;
         }
@@ -47,16 +56,21 @@
 #else
         Log("DriverEntry() Starting Diglett as manually mapped driver!\n");
 #endif // LEGIT_DRIVER
-
-    //kernBase = GetNtoskrnlBaseAddress();
-
+    
     UINT64 outBase = 0;
     UINT64 outSize = 0;
-    Utility::GetUserModBase("unused.dll", 3712, &outBase, &outSize);
+    Utility::GetUserModBase("unused.dll", 6088, &outBase, &outSize);
 
-    //HANDLE threadHandle;
-    //PsCreateSystemThread(&threadHandle, GENERIC_ALL, 0, 0, 0, MainThread, 0);
-    //ZwClose(threadHandle);
+#ifdef USERLAND_COMMUNICATE
+    SetHook(true);
+#endif // USERLAND_COMMUNICATE
+
+#ifdef USE_SYSTEM_THREAD
+    HANDLE threadHandle;
+    PsCreateSystemThread(&threadHandle, GENERIC_ALL, 0, 0, 0, DrawThread, 0);
+    ZwClose(threadHandle);
+#endif // USE_SYSTEM_THREAD
+
     LogInfo("~DriverEntry()");
     return STATUS_SUCCESS;
 }
@@ -64,6 +78,10 @@
 #ifdef LEGIT_DRIVER
     void Unload(_In_ PDRIVER_OBJECT DriverObject)
     {
+#ifdef USERLAND_COMMUNICATE
+        SetHook(false);
+#endif // USERLAND_COMMUNICATE
+
         UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\Diglett");
         // delete sym link
         IoDeleteSymbolicLink(&symLink);
@@ -149,42 +167,6 @@ uintptr_t GetNtoskrnlBaseAddress()
     return pageInNtoskrnl;
 }
 
-//extern "C" void MainThread(PVOID StartContext)
-//{
-//    LogInfo("Main thread started\n");
-//    auto increment = 0;
-//    HANDLE ourThread = PsGetCurrentThreadId();
-//    LogInfo("Our thread id:  %llu\n", (unsigned long long)ourThread);
-//    auto cpuIndex = KeGetCurrentProcessorNumber();
-//    LogInfo("Running on CPU: %lu", cpuIndex);
-//    
-//    PKTHREAD thisThread = (PKTHREAD)__readgsqword(0x188);
-//
-//    LogInfo("Hiding system thread:");
-//    thisThread = reinterpret_cast<PKTHREAD>(KeGetCurrentThread());
-//    LogInfo("\t\t\tKTHREAD->SystemThread = %lu", thisThread->SystemThread);
-//    thisThread->SystemThread = 0;
-//    LogInfo("\t\t\tKTHREAD->SystemThread = %lu", thisThread->SystemThread);
-//
-//    LogInfo("Spoofing thread entry point:");
-//    _ETHREAD* myThread = reinterpret_cast<_ETHREAD*>(thisThread);
-//    LogInfo("\t\t\t_ETHREAD->StartAddress = %p", myThread->StartAddress);
-//    uintptr_t newWin32StartAddr = kernBase + 0x3000;
-//    myThread->StartAddress = (PVOID)newWin32StartAddr;
-//    LogInfo("\t\t\t_ETHREAD->StartAddress = %p", myThread->StartAddress);
-//    LogInfo("\t\t\t_ETHREAD->Win32StartAddress = %p", myThread->Win32StartAddress);
-//    myThread->Win32StartAddress = (PVOID)newWin32StartAddr;
-//    LogInfo("\t\t\t_ETHREAD->Win32StartAddress = %p", myThread->Win32StartAddress);
-//
-//    while (runThread)
-//    {
-//        LARGE_INTEGER li;
-//        li.QuadPart = -10000000;
-//        KeDelayExecutionThread(KernelMode, FALSE, &li);
-//    }
-//    LogInfo("exiting thread\n");
-//}
-
 // Communication method via hook in legit driver control handler
 //NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT tcpipDevObj, PIRP Irp)
 //{
@@ -230,54 +212,140 @@ uintptr_t GetNtoskrnlBaseAddress()
 //    return status;
 //}
 
-/// <summary>
-/// Uses ZwQuerySysInfo to get legit module ranges
-/// </summary>
-/// <param name="ZwQuerySysInfo">pointer to ZwQuerySystemInformation</param>
-/// <param name="outProcMods">pointer to struct with data out</param>
-/// <returns>status</returns>
-//NTSTATUS EnumKernelModuleInfo(_In_ ZwQuerySysInfoPtr ZwQuerySysInfo) {
-//    ULONG size = NULL;
-//    outProcMods = NULL;
-//
-//    // test our pointer
-//    NTSTATUS status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, 0, 0, &size);
-//    if (STATUS_INFO_LENGTH_MISMATCH == status) {
-//        LogError("ZwQuerySystemInformation test successed, status: %08x", status);
-//    }
-//    else
-//    {
-//        LogError("Unexpected value from ZwQuerySystemInformation, status: %08x", status);
-//        return status;
-//    }
-//
-//    outProcMods = (PRTL_PROCESS_MODULES)ExAllocatePool(NonPagedPool, size);
-//    if (!outProcMods) {
-//        LogError("Insufficient memory in the free pool to satisfy the request");
-//        return STATUS_UNSUCCESSFUL;
-//    }
-//
-//    if (!NT_SUCCESS(status = ZwQuerySysInfo(SYSTEM_MODULE_INFORMATION, outProcMods, size, 0))) {
-//        LogError("ZwQuerySystemInformation failed");
-//        ExFreePool(outProcMods);
-//        return status;
-//    }
-//
-//    KdPrint(("Using ZwQuerySystemInformation with SYSTEM_MODULE_INFORMATION.  Modules->NumberOfModules = %lu\n", outProcMods->NumberOfModules));
-//
-//    for (ULONG i = 0; i < outProcMods->NumberOfModules; i++)
-//    {
-//        LogInfo("Module[%d].FullPathName: %s\n", (int)i, (char*)outProcMods->Modules[i].FullPathName);
-//        LogInfo("Module[%d].ImageBase: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageBase);
-//        LogInfo("Module[%d].MappedBase: %p\n", (int)i, (char*)outProcMods->Modules[i].MappedBase);
-//        LogInfo("Module[%d].LoadCount: %p\n", (int)i, (char*)outProcMods->Modules[i].LoadCount);
-//        LogInfo("Module[%d].ImageSize: %p\n", (int)i, (char*)outProcMods->Modules[i].ImageSize);
-//    }
-//
-//    LogInfo("ZwQuerySystemInformation complete\n");
-//    ExFreePool(outProcMods);
-//    return STATUS_SUCCESS;
-//}
+/* hook/unhook driver */
+NTSTATUS SetHook(BOOL setHook)
+{
+    UNICODE_STRING driverName;
+    UNICODE_STRING newDrvName;
+    //PDRIVER_OBJECT tcpipDrvObj;
+    DRIVER_OBJECT myDummyDriver;
+    PDEVICE_OBJECT tcpipDevice;
+    PDRIVER_OBJECT DriverObject = NULL;
+    NTSTATUS status;
+    PDRIVER_OBJECT dummyDriver;
+    //HANDLE fileHandle;
+    //UNICODE_STRING fileName = RTL_CONSTANT_STRING(L"\\DosDevices\\C:\\\\Windows\\System32\\drivers\\tcpip.sys");
+    //OBJECT_ATTRIBUTES objAttr;
+    //IO_STATUS_BLOCK ioStatusBlock;
+
+    // Psched works well!
+    //RtlInitUnicodeString(&driverName, L"\\Driver\\Psched");
+    RtlInitUnicodeString(&driverName, L"\\Driver\\Null");
+
+    status = ObReferenceObjectByName(&driverName, OBJ_CASE_INSENSITIVE, NULL, 0,
+        *IoDriverObjectType, KernelMode, NULL, (PVOID*)&DriverObject);
+
+    if (!NT_SUCCESS(status)) {
+        LogError("Failed to obtain DriverObject (0x%08X)", status);
+        return status;
+    }
+
+    if (setHook)
+    {
+        LogInfo("Hooking Null driver major funcs...");
+        for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++) {
+            //save the original pointer in case we need to restore it later
+            gOriginalDispatchFunctionArray[i] = DriverObject->MajorFunction[i];
+            //replace the pointer with our own pointer
+            if (i == IRP_MJ_CREATE)
+            {
+                DriverObject->MajorFunction[i] = Hk_Create;
+                LogInfo("\tHooked IRP_MJ_CREATE");
+                LogInfo("\t\tOld: %p", gOriginalDispatchFunctionArray[i]);
+                LogInfo("\t\tNew: %p", DriverObject->MajorFunction[i]);
+            }
+            if (i == IRP_MJ_DEVICE_CONTROL)
+            {
+                DriverObject->MajorFunction[i] = Hk_DeviceControl;
+                LogInfo("\tHooked IRP_MJ_DEVICE_CONTROL");
+                LogInfo("\t\tOld: %p", gOriginalDispatchFunctionArray[i]);
+                LogInfo("\t\tNew: %p", DriverObject->MajorFunction[i]);
+            }
+        }
+        
+        LogInfo("Hooking Null driver object FastIoDispatch->FastIoDeviceControl...");
+        gOriginalFastIoControl = DriverObject->FastIoDispatch->FastIoDeviceControl;
+        DriverObject->FastIoDispatch->FastIoDeviceControl = (PFAST_IO_DEVICE_CONTROL)Hk_FastIoDispatch;
+        LogInfo("\t\tOld: %p", gOriginalFastIoControl);
+        LogInfo("\t\tNew: %p", DriverObject->FastIoDispatch->FastIoDeviceControl);
+    }
+    else
+    {
+        for (int i = 0; i < IRP_MJ_MAXIMUM_FUNCTION; i++) {
+            DriverObject->MajorFunction[i] = (PDRIVER_DISPATCH)gOriginalDispatchFunctionArray[i];
+        }
+        LogInfo("Unhooked Null driver major functions...");
+
+        DriverObject->FastIoDispatch->FastIoDeviceControl = gOriginalFastIoControl;
+        LogInfo("\tUnhooked ->FastIoDispatch->FastIoDeviceControl");
+    }
+
+    //cleanup
+    ObDereferenceObject(DriverObject);
+
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN Hk_FastIoDispatch(
+    _In_ _FILE_OBJECT* FileObject,
+    _In_ BOOLEAN Wait,
+    _In_opt_ PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_opt_ PVOID OutputBuffer,
+    _In_ ULONG OutputBufferLength,
+    _In_ ULONG IoControlCode,
+    _Out_ PIO_STATUS_BLOCK IoStatus,
+    _In_ _DEVICE_OBJECT* DeviceObject)
+{
+    LogInfo("Hk_FastIoDispatch executed in Diglett!");
+
+    switch (IoControlCode)
+    {
+    case IOCTL_DRAW_START: {
+        DiglettDrv::gRunThread = true;
+        LogInfo("Starting Draw Thread.");
+        HANDLE threadHandle;
+        PsCreateSystemThread(&threadHandle, GENERIC_ALL, 0, 0, 0, DrawMain, 0);
+        ZwClose(threadHandle);
+        break;
+    }
+    case IOCTL_DRAW_STOP: {
+        LogInfo("Stopping Draw Thread.");
+        DiglettDrv::gRunThread = false;
+        break;
+    }
+    default:
+        break;
+    }
+
+    if (!gOriginalFastIoControl)
+    {
+        return 0;
+    }
+    
+    return gOriginalFastIoControl(
+        FileObject,
+        Wait,
+        InputBuffer,
+        InputBufferLength,
+        OutputBuffer,
+        OutputBufferLength,
+        IoControlCode,
+        IoStatus,
+        DeviceObject);
+}
+
+NTSTATUS Hk_DeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    LogInfo("IRP_MJ_DEVICE_CONTROL hook executed in Diglett!");
+    return ((DevCtrlPtr)(gOriginalDispatchFunctionArray[IRP_MJ_DEVICE_CONTROL]))(DeviceObject, Irp);
+}
+
+NTSTATUS Hk_Create(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    LogInfo("IRP_MJ_CREATE hook executed in Diglett!");
+    return ((DevCtrlPtr)(gOriginalDispatchFunctionArray[IRP_MJ_CREATE]))(DeviceObject, Irp);
+}
 
 PLOAD_IMAGE_NOTIFY_ROUTINE ImageNotifyRoutine(PUNICODE_STRING FullImageName, HANDLE ProcID, PIMAGE_INFO ImageInfo)
 {

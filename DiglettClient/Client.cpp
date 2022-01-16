@@ -7,9 +7,9 @@
 #include "Client.h"
 
 int main(int argc, char** argv) {
-	std::cout << "Opening handle to tcpip driver object...\n";
+	std::cout << "Opening handle to Psched device object...\n\n";
 	// open handle to device
-	HANDLE hDevice = CreateFile(L"\\\\.\\Tcp", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+	HANDLE hDevice = CreateFile(L"\\\\.\\NUL", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
 	if (hDevice == INVALID_HANDLE_VALUE) {
 		Logger(LOGLVL::ERR, "Failed to open handle...");
 		std::cout << "GetLastError():  " << std::hex << GetLastError() << std::endl;
@@ -28,8 +28,9 @@ int main(int argc, char** argv) {
 		
 		loop = CmdHandler(hDevice, line);
 	}
-
+	
 	CloseHandle(hDevice);
+	Logger(LOGLVL::INFO, "Handle to driver closed.");
 	system("pause");
 	return 0;
 }
@@ -60,6 +61,8 @@ bool CmdHandler(HANDLE hDevice, char* line) {
 	bool dumpCmd = input.CheckCmd("dump");
 	bool helpCmd = input.CheckCmd("help");
 	bool echoCmd = input.CheckCmd("echo");
+	bool exitCmd = input.CheckCmd("exit");
+	bool fastIoCmd = input.CheckCmd("fastio");
 
 	bool modFlag = input.CmdOptionExists("-m");
 	bool addrFlag = input.CmdOptionExists("-a");
@@ -68,6 +71,7 @@ bool CmdHandler(HANDLE hDevice, char* line) {
 	if (helpCmd) {
 		std::cout << "\t\t" << "dump " << " " << "[-a <address> -l <length>] | [-m <module_name>]" << std::endl;
 		std::cout << "\t\t" << "echo " << " " << "[-m <message>]" << std::endl;
+		std::cout << "\t\t" << "exit " << std::endl;
 		return PROMPT;
 	}
 	else if (dumpCmd)
@@ -143,11 +147,22 @@ bool CmdHandler(HANDLE hDevice, char* line) {
 			Logger(LOGLVL::ERR, "Dump request failed!\n");
 		return PROMPT;
 	}
+	else if (fastIoCmd)
+	{
+		Logger(LOGLVL::INFO, "Attempting fastio!\n");
+		success = DeviceIoControl(hDevice, IOCTL_ECHO_REQUEST, nullptr, 0, nullptr, 0, nullptr, nullptr);
+		std::cout << "GetLastError(): 0x" << std::hex << GetLastError() << std::endl;
+		return PROMPT;
+	}
+	else if (exitCmd)
+	{
+		return EXIT;
+	}
 	else {
 		Logger(LOGLVL::WARN, "Unrecognized command, use help for commands.");
 		return PROMPT;
 	}
-	return EXIT;
+	
 }
 
 void Logger(LOGLVL LogLvl, const char* message) {
